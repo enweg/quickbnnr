@@ -86,7 +86,7 @@ BNN <- function(net, y, x) {
   modelname <- get_random_symbol()
   JuliaCall::julia_command(sprintf("%s = %s(y, x);", modelname, bnnname))
 
-  out <- list(juliavar = modelname,
+  out <- list(juliavar = list(model = modelname, bnn = bnnname),
               y = y,
               x = x)
   return(out)
@@ -102,7 +102,8 @@ BNN <- function(net, y, x) {
 #'         the draws in a format that it can be used with bayesplot, and some additional internal information
 #' @export
 estimate <- function(model, niter=100, nchains=1){
-  model <- model$juliavar
+  mod <- model
+  model <- model$juliavar$model
   chainname = get_random_symbol()
   JuliaCall::julia_command(sprintf("%s = sample(%s, NUTS(), MCMCThreads(), %i, %i)", chainname, model, niter, nchains))
   JuliaCall::julia_command(sprintf("%s = MCMCChains.get_sections(%s, :parameters)", chainname, chainname))
@@ -117,7 +118,102 @@ estimate <- function(model, niter=100, nchains=1){
               varinfo = varinfo,
               draws = draws,
               niter = niter,
-              nchains = nchains)
+              nchains = nchains,
+              model = mod)
   class(out) <- "quickbnnr.estimate"
   return(out)
+}
+
+#' Clean parameters for better understanding
+#'
+#' Some of the layers implemented take cumsums of variables to obtain
+#' the actual NN parameters used. \code{\link{estimate}} will return
+#' the parameters before taking the cumsum and thus can be difficult
+#' to interpret. This method fixes this.
+#'
+#' @param est estimated model using \code{\link{estimate}}
+#'
+#' @export
+clean_parameters <- function(est){
+  cleanchain <- get_random_symbol()
+  JuliaCall::julia_command(sprintf("%s = generated_quantities_chain(%s, %s)",
+                                   cleanchain, est$model$juliavar$model, est$juliavar))
+  varinfo <- JuliaCall::julia_eval(sprintf("String.(%s.name_map.parameters)", cleanchain))
+  draws <- JuliaCall::julia_eval(sprintf("%s.value.data", cleanchain))
+  draws <- aperm(draws, c(1, 3, 2))
+  dimnames(draws) <- list(iterations = NULL,
+                          chains = paste0("chain:", 1:est$nchains),
+                          parameters = varinfo)
+  out <- list(juliavar = cleanchain,
+              varinfo = varinfo,
+              draws = draws,
+              niter = est$niter,
+              nchains = est$nchains,
+              model = est$model)
+  class(out) <- "quickbnnr.estimate"
+  return(out)
+}
+
+
+#' Uses posterior draws for prediction
+#'
+#' If a x is provided, then that x will be used for predictions,
+#' otherwise the input to the original model will be used.
+#'
+#' @param est Eestimated model using \code{\link{estimate}}
+#' @param ... if x is provided, then that will be used for making predictions
+#'
+#' @export
+predict.quickbnnr.estimate <- function(est, ...){
+  args <- list(...)
+  if ('x' %in% names(args)) x <- args$x else x <- est$model$x
+  predictname <- get_random_symbol()
+  JuliaCall::julia_assign(sprintf("%s_x", predictname), x)
+  JuliaCall::julia_command(sprintf("%s = posterior_predictive(%s, %s_x, %s)",
+                                   predictname, est$model$juliavar$bnn, predictname, est$juliavar))
+  varinfo <- JuliaCall::julia_eval(sprintf("String.(%s.name_map.parameters)", predictname))
+  draws <- JuliaCall::julia_eval(sprintf("%s.value.data", predictname))
+  # Bringing this into a standard format
+  draws <- aperm(draws, c(1, 3, 2))
+  dimnames(draws) <- list(iterations = NULL,
+                          chains = paste0("chain:", 1:est$nchains),
+                          parameters = varinfo)
+  return(draws)
+}
+
+
+#' Just a helper function
+.summary <- function(summaryvar, section, to_string = FALSE){
+  if (to_string) {
+    return (JuliaCall::julia_eval(sprintf("String.(%s.nt.%s)", summaryvar, section)))
+  }
+  JuliaCall::julia_eval(sprintf("%s.nt.%s", summaryvar, section))
+}
+
+#' Returns summary statistics of an estimated model
+#'
+#' @param est model estimated using \code{\link{estimate}}
+#'
+#' @export
+summary.quickbnnr.estimate <- function(est){
+  summaryvar <- get_random_symbol()
+  JuliaCall::julia_command(sprintf("%s = describe(%s)[1];", summaryvar, est$juliavar))
+  ess <- .summary(summaryvar, "ess")
+  ess_per_sec <- .summary(summaryvar, "ess_per_sec")
+  mcse <- .summary(summaryvar, "mcse")
+  mu <- .summary(summaryvar, "mean")
+  naive_se <- .summary(summaryvar, "naive_se")
+  parameters <- .summary(summaryvar, "parameters", to_string = TRUE)
+  rhat <- .summary(summaryvar, "rhat")
+  std <- .summary(summaryvar, "std")
+  return(data.frame(list(
+    Parameter = parameters,
+    mean = mu,
+    std = std,
+    naive_se = naive_se,
+    mcse = mcse,
+    ess = ess,
+    ess_per_sec = ess_per_sec,
+    rhat = rhat
+  )))
 }
