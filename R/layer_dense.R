@@ -5,10 +5,10 @@
 #' @param activation activation function
 #'
 #' @export
-DenseBNN <- function(in_size, out_size,
+BDense <- function(in_size, out_size,
                      activation = c("identity", "sigmoid", "tanh", "relu")){
   activation <- match.arg(activation)
-  juliacode <- sprintf("DenseBNN(%i, %i, :%s)", in_size, out_size, activation)
+  juliacode <- sprintf("BDense(%i, %i, :%s)", in_size, out_size, activation)
   return(list(in_size = in_size, out_size = out_size, activation = activation,
               julia = juliacode))
 }
@@ -77,10 +77,6 @@ DenseForcePosFirstWeight <- function(in_size, out_size,
 #'
 #' @return Returns the julia specification of the network as a string
 #'         to be passed on to \code{\link{make_net}}
-#'
-#' @examples
-#' net <- Chain(DenseForcePosFirstWeight(1, 1, "sigmoid"), DenseBNN(1, 1))
-#'
 #' @export
 Chain <- function(...){
   julia <- "ChainBNN("

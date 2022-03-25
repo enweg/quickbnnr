@@ -14,10 +14,16 @@ quickbnnr_setup <- function(pkg_check = TRUE, nthreads = 4, ...) {
     JuliaCall::julia_install_package_if_needed("git@github.com:enweg/QuickBNN.git")
     JuliaCall::julia_install_package_if_needed("Turing")
     JuliaCall::julia_install_package_if_needed("Flux")
+    JuliaCall::julia_install_package_if_needed("ReverseDiff")
+    JuliaCall::julia_install_package_if_needed("Memoization")
   }
   JuliaCall::julia_library("QuickBNN")
   JuliaCall::julia_library("Flux")
   JuliaCall::julia_library("Turing")
+  JuliaCall::julia_library("ReverseDiff")
+  JuliaCall::julia_library("Memoization")
+  JuliaCall::julia_command("Turing.setadbackend(:reversediff);")
+  JuliaCall::julia_command("Turing.setrdcache(true);")
 }
 
 #' Create a BNN based on a specification
@@ -60,29 +66,35 @@ make_net <- function(specification){
 #' @param y a numerical vector of length N
 #' @param x a numerical matrix with each column being one input and one row being one variable
 #'          For example, for a network with one input, N = 100 observations, nrow(x) = 1, ncol(x) = N
+#' @param likelihood determine the likelihood term of the model. See QuickBNN.jl for implemented likelihoods
 #'
-#' @examples
-#' y <- arima.sim(list(ar = 0.5), n = 500)
-#' x <- matrix(y[1:499], nrow = 1)
-#' y <- y[2:500]
-#' quickbnnr_setup()
-#' net <- Chain(DenseBNN(1, 1, "sigmoid"), DenseBNN(1, 1))
-#' net <- make_net(net)
-#' model <- BNN(net, y, x)
-#' chains <- estimate(model, niter = 100, nchains = 4)
-#'
-#' # library(bayesplot)
-#' # mcmc_intervals(chains$draws)
 #'
 #' @export
-BNN <- function(net, y, x) {
+BNN <- function(net, y, x, likelihood = c("normal", "normal_seq_to_one",
+                                          "tdist", "tdist_seq_to_one"), ...) {
+  likelihood <- match.arg(likelihood)
   netname <- net$juliavar
   # making the BNN
   bnnname <- get_random_symbol()
-  JuliaCall::julia_command(sprintf("%s = BNN(%s);", bnnname, netname))
+  args <- list(...)
+  if ("nu" %in% names(args) & substr(likelihood, 1, 5) == "tdist"){
+    nuname <- get_random_symbol()
+    JuliaCall::julia_assign(nuname, args[["nu"]])
+    JuliaCall::julia_eval(nuname)
+    JuliaCall::julia_command(sprintf("%s = BNN(%s, QuickBNN.likelihood_%s; ν = %s);",
+                                     bnnname, netname, likelihood, nuname))
+  }
+  else {
+    JuliaCall::julia_command(sprintf("%s = BNN(%s, QuickBNN.likelihood_%s);",
+                                     bnnname, netname, likelihood))
+  }
   # adding data to the model
   JuliaCall::julia_assign("y", y)
   JuliaCall::julia_assign("x", x)
+  if (ndims(x) == 3){
+    # RNN case
+    JuliaCall::julia_command("x = to_RNN_format(x);")
+  }
   modelname <- get_random_symbol()
   JuliaCall::julia_command(sprintf("%s = %s(y, x);", modelname, bnnname))
 
@@ -217,3 +229,4 @@ summary.quickbnnr.estimate <- function(est){
     rhat = rhat
   )))
 }
+
