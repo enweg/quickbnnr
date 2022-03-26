@@ -184,3 +184,12 @@ param <- draws_model3$draws[,,"Wh1[2,2]", drop = FALSE]
 mcmc_dens_overlay(param)
 ```
 
+### T-Distribution
+
+If errors are more likely to have fatter tails, then the Gaussian likelihood might not be appropriate. In such circumstances, a t-distribution can be used. Here the assumption is that $\frac{y - \text{net(x)}}{\sigma} \sim T(\nu)$. $\nu$ must be given by the modeller. 
+
+```{r}
+model1_tdist <- BNN(net1, y, x, likelihood = "tdist_seq_to_one")
+summary(model1_tdist)
+```
+
