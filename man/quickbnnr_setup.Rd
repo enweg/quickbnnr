@@ -4,12 +4,14 @@
 \alias{quickbnnr_setup}
 \title{Set up of the Julia environment needed for QuickBNN}
 \usage{
-quickbnnr_setup(pkg_check = TRUE, nthreads = 4, ...)
+quickbnnr_setup(pkg_check = TRUE, nthreads = 4, seed = NULL, ...)
 }
 \arguments{
 \item{pkg_check}{Booloan; Whether to check if packages are isntalled; Default is TRUE}
 
 \item{nthreads}{Int; Number of threads to use; Default is 4;}
+
+\item{seed}{seed to be used}
 
 \item{...}{addtitional params passed to JuliaCall::julia_setup}
 }

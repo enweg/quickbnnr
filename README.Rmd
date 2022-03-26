@@ -1,0 +1,186 @@
+---
+output: github_document
+bibliography: bibliography.bib
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "man/figures/README-",
+  out.width = "100%"
+)
+```
+
+# quickbnnr
+
+<!-- badges: start -->
+<!-- badges: end -->
+
+The goal of quickbnnr is to provide a fast and quick implementation of Bayesian Neural Networks. This is work in progress and so far includes various forms of Dense layers that use different priors and constraints, as well as an RNN layer. LSTM layers are planned but are not working yet. 
+
+## Installation
+
+You can install the development version of quickbnnr from [GitHub](https://github.com/) with:
+
+``` r
+# install.packages("devtools")
+devtools::install_github("enweg/quickbnnr")
+```
+
+## RNN Example
+
+Before we can use `quickbnnr` we must first setup the environment. Since `quickbnnr` is only an interface to `QuickBNN.jl`, we need to make sure that Julia is working. This should all be automatically handled by calling `quickbnnr_setup()` at the beginning of every session. 
+
+```{r}
+library(quickbnnr)
+quickbnnr_setup(nthreads = 4, seed = 6150533) # We will want to sample in parallel later
+```
+
+Lets say you have a sequence of univariate data. This might, for example, be the returns of a single stock or stock index for various time points. If your goal is to predict the next value of the sequence given a certain lock back horizon, what you are facing is a sequence-to-one problem. For example, if you have 100 data points on a stock index and wish to predict the next value given the last 20, what you can do it to split the full 100 sample period into sequences of length 20. These are then the training data. Each of these sequences is then fed through a RNN and the next value is predicted. 
+
+Denoting $\text{net}(x)$ the output of the network for all sequences (this would be a vector with one point per sequence - or better subsequence), we can write the first model as 
+
+$$
+\theta_i \sim \text{Normal}(0, 1) \quad\forall i \\
+\sigma \sim \text{InverseGamma}(1, 1) \\
+y \sim \text{MvNormal}(\text{net}(x), \sigma*I)
+$$
+
+Thus, the standard RNN model implements a standard normal prior for all coefficients of the RNN and an Inverse Gamma prior for the standard deviation. The likelihood is then modelled as a Normal. 
+
+To demonstrate this model, we will be working with a simple AR(1) process. 
+
+```{r}
+data <- arima.sim(list(ar = 0.5), n = 600)
+y_test <- data[501:600]
+y <- data[1:500]
+```
+
+`quickbnnr` expects a tensor (3d array) of dimensions $\text{features}\times\text{num sequences}\times\text{length sequence}$ for RNN models. We thus need to create such a tensor. The following helper function can be used, where we split the full `r length(y)` long sample into sequences of length 20. The last slice are then the training labels, while all the other slices are the training data. 
+
+
+```{r}
+tensor <- tensor_embed(y, len_seq = 20)
+y <- tensor[,,20]
+x <- tensor[,,1:19, drop = FALSE]
+```
+
+We can now specify a network. This is done using the `Chain` function, which essentially chains together layers. We will be using a Bayesian RNN layer (`BRNN`) and a simple Bayesian Dense layer (`BDense`). 
+
+```{r}
+spec1 <- Chain(BRNN(1, 1)) # we have one input (only one feature) and one output
+spec2 <- Chain(BRNN(1, 1), BDense(1, 1)) # same as above but with an extra linear output layer
+spec3 <- Chain(BRNN(1, 5), BDense(5, 1)) # same as above, but with a hidden state of size 5
+```
+
+Having defined these specifications, we need to create the actual networks. This is done by calling `make_net` which takes a specification and creates the network in QuickBNN.jl
+
+```{r}
+net1 <- make_net(spec1)
+net2 <- make_net(spec2)
+net3 <- make_net(spec3)
+```
+
+At this point we have a network but not a full model yet. To obtain a full model, we need to bring together the network structure, the data, and a likelihood function. In this case, we will be using a Gaussian likelihood. A model is created by calling `BNN`.
+
+```{r}
+model1 <- BNN(net1, y, x, likelihood = "normal_seq_to_one")
+model2 <- BNN(net2, y, x, likelihood = "normal_seq_to_one")
+model3 <- BNN(net3, y, x, likelihood = "normal_seq_to_one")
+```
+
+At the moment only the NUTS sampler is supported and also only in its default implementation. This is often good enough for small models. **Future work will implement faster approximate methods and allow for changing of NUTS parameters**. We can estimate the models by calling `estimate` and specifying how many draws and how many chains we want to use. Note: if `nthreads` in `quickbnnr_setup` is greater than one, then chains will be drawn in parallel. The first execution usually takes longer. This is due to the just-in-time compilation of the underlying Julia code. If STAN was chosen instead, then compilation would be done ahead of time, explaining why it often seems like it is drawing faster. Actual drawing - after the just-in-time compilation finished, should be fast for small models. 
+
+```{r}
+draws_model1 <- estimate(model1, niter = 1000, nchains = 4)
+```
+
+
+`quickbnnr` supports the use of `bayesplot`, making visual checks easy to implement. Additionally, estimate always prints out a summary, which can be also obtained by calling `summary` on the estimated model. 
+
+```{r}
+summary(draws_model1) # calling summary to see ess and rhat
+```
+
+Both ESS and RHAT seem to be reasonable here. We can also visually check this and check the autocorrelations. The graphs below show that visually there are also no problems.  
+
+```{r}
+library(bayesplot)
+bayesplot::color_scheme_set(scheme = "red")
+mcmc_acf(draws_model1$draws)
+```
+
+```{r}
+mcmc_dens_overlay(draws_model1$draws)
+```
+
+```{r}
+mcmc_trace(draws_model1$draws)
+```
+
+Posterior predictions can be obtained by calling `predict`. If new data is provided, this new data is being used, otherwise the training is used. 
+
+```{r}
+predictions <- predict(draws_model1, x) # using training data
+```
+
+We can compare these predictions/fitted values to the actual values. Note though that the first model only uses an RNN layer with a tanh activation function. As such, output values can never lie outside [-1, 1], explaining the need for model2 which includes another linear layer allowing for outputs outside this range. 
+
+```{r}
+p.mean <- apply(predictions, 3, mean)
+p.q95 <- apply(predictions, 3, function(x) quantile(x, 0.95))
+p.q05 <- apply(predictions, 3, function(x) quantile(x, 0.05))
+plot(1:length(y), y, "l", xlab = "", ylab = "")
+lines(1:length(y), p.mean, col = "red")
+lines(1:length(y), p.q95, col = "red", lty = 2)
+lines(1:length(y), p.q05, col = "red", lty = 2)
+```
+
+We can do the same using test data. First we need to prepare the test data along the lines of what we saw above. 
+
+```{r}
+x_test <- c(y[(length(y)-19+1):length(y)], y_test[-length(y_test)])
+tensor_test <- tensor_embed(x_test, len_seq = 19) # we prevously took the last slice as labels 
+predictions_test <- predict(draws_model1, x = tensor_test)
+pt.mean <- apply(predictions_test, 3, mean)
+pt.q95 <- apply(predictions_test, 3, function(x) quantile(x, 0.95))
+pt.q05 <- apply(predictions_test, 3, function(x) quantile(x, 0.05))
+
+
+plot(1:length(y_test), y_test, "l", xlab = "", ylab = "", 
+     main = "Test Set one period ahead predictions")
+lines(1:length(y_test), pt.mean, col = "red")
+lines(1:length(y_test), pt.q95, col = "red", lty = 2)
+lines(1:length(y_test), pt.q05, col = "red", lty = 2)
+```
+
+### Comparing to other models
+
+For the second model, in which we also use a linear output layer, everything seems to be fine. Rhats are within reasonable values, so are ESS and the density plots show nice unimodal distributions. This latter fact is a rarety in Bayesian Neural Networks and will not be true for larger models. 
+
+```{r}
+draws_model2 <- estimate(model2, niter = 1000, nchains = 4)
+summary(draws_model2)
+```
+
+```{r}
+mcmc_dens_overlay(draws_model2$draws)
+```
+
+For example, for model three we encounter multimodality and chains seem to mix badly, as indicated by the often high Rhats. The multimodality of larger and deeper models makes sampling from it difficult.
+
+```{r}
+draws_model3 <- estimate(model3, niter = 1000, nchains = 4)
+summary(draws_model3)
+```
+
+Interestingly, this outcome corresponds rather nicely to a discussion in chapter 17.5 of @pml2Book about the generalisation properties of Bayesian Deep Learning and sharpe vs. flat minima. Here, the left model might very well correspond to an overfitting and overconfidenty parameterisation, while the flatter model that has been better explored would correspond to the better generalising parameterisation. As such, even though the chains did not mix well, they still might be useful to obtain first uncertainty estimates. Encountering such a sharp mode might also point towards an overparameterisation of the network, which clearly is the case here in which we want to approximate a AR(1) model with a RNN that has a hidden state of size five. 
+
+```{r}
+param <- draws_model3$draws[,,"Wh1[2,2]", drop = FALSE]
+mcmc_dens_overlay(param)
+```
+

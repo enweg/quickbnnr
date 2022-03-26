@@ -3,11 +3,12 @@
 #'
 #' @param pkg_check Booloan; Whether to check if packages are isntalled; Default is TRUE
 #' @param nthreads Int; Number of threads to use; Default is 4;
+#' @param seed seed to be used
 #' @param ... addtitional params passed to JuliaCall::julia_setup
 #'
 #' @return Nothing
 #' @export
-quickbnnr_setup <- function(pkg_check = TRUE, nthreads = 4, ...) {
+quickbnnr_setup <- function(pkg_check = TRUE, nthreads = 4, seed = NULL, ...) {
   Sys.setenv(JULIA_NUM_THREADS = sprintf("%i", nthreads))
   julia <- JuliaCall::julia_setup(installJulia = TRUE, ...)
   if (pkg_check) {
@@ -16,14 +17,30 @@ quickbnnr_setup <- function(pkg_check = TRUE, nthreads = 4, ...) {
     JuliaCall::julia_install_package_if_needed("Flux")
     JuliaCall::julia_install_package_if_needed("ReverseDiff")
     JuliaCall::julia_install_package_if_needed("Memoization")
+    JuliaCall::julia_install_package_if_needed("Random")
   }
   JuliaCall::julia_library("QuickBNN")
   JuliaCall::julia_library("Flux")
   JuliaCall::julia_library("Turing")
   JuliaCall::julia_library("ReverseDiff")
   JuliaCall::julia_library("Memoization")
+  JuliaCall::julia_library("Random")
   JuliaCall::julia_command("Turing.setadbackend(:reversediff);")
   JuliaCall::julia_command("Turing.setrdcache(true);")
+  if (!is.null(seed)) quickbnnr_seed(seed)
+}
+
+#' Sets a seed for replication purposes
+#'
+#' @param seed seed to be used
+#'
+#' @export
+quickbnnr_seed <- function(seed){
+  JuliaCall::julia_command(sprintf("Random.seed!(%i)",
+                                   seed))
+  set.seed(seed)
+  message(sprintf("Set the seed in both Julia and R to %i",
+                  seed))
 }
 
 #' Create a BNN based on a specification
@@ -181,6 +198,8 @@ predict.quickbnnr.estimate <- function(est, ...){
   if ('x' %in% names(args)) x <- args$x else x <- est$model$x
   predictname <- get_random_symbol()
   JuliaCall::julia_assign(sprintf("%s_x", predictname), x)
+  if (ndims(x) == 3) JuliaCall::julia_command(sprintf("%s_x = to_RNN_format(%s_x)",
+                                                      predictname, predictname))
   JuliaCall::julia_command(sprintf("%s = posterior_predictive(%s, %s_x, %s)",
                                    predictname, est$model$juliavar$bnn, predictname, est$juliavar))
   varinfo <- JuliaCall::julia_eval(sprintf("String.(%s.name_map.parameters)", predictname))
